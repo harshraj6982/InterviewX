@@ -201,24 +201,58 @@ class ChatInput:
         except Exception:
             self.stt_manager = None
 
+        # -- new toggle logic fields --
+        self._listening = False
+        self._silence_timer_id: Optional[str] = None
+
         self.mic_btn = tk.Button(
-            frame, text="🎙️", command=self._start_listening)
+            frame, text="🎙️", command=self._toggle_listening)
         self.mic_btn.pack(side=tk.RIGHT, padx=(5, 0))
 
-    def _start_listening(self):
-        """Record, transcribe, and insert into entry without blocking UI."""
+    def _toggle_listening(self):
+        """Toggle live listening on/off."""
         if not self.stt_manager:
             return
 
-        def worker():
-            try:
-                text = self.stt_manager.listen()
-                self.entry.delete(0, tk.END)
-                self.entry.insert(0, text)
-            except Exception:
-                pass
+        if not self._listening:
+            # start live stream: append into entry, auto-submit after silence
+            self.stt_manager.start_stream(
+                append_callback=self._append_text,
+                submit_callback=self._on_silence_submit,
+                silence_timeout=10
+            )
+            self.mic_btn.config(text="⏹️")  # stop icon
+            self._listening = True
+        else:
+            # stop live stream
+            self.stt_manager.stop_stream()
+            self.mic_btn.config(text="🎙️")
+            self._clear_silence_timer()
+            self._listening = False
 
-        threading.Thread(target=worker, daemon=True).start()
+    def _append_text(self, text: str):
+        """Append transcribed text into the entry field."""
+        # insert at end and reset auto-submit timer
+        self.entry.insert(tk.END, text)
+        self._reset_silence_timer()
+
+    def _reset_silence_timer(self):
+        """Reset the 10s silence auto-submit timer."""
+        if self._silence_timer_id:
+            self.entry.after_cancel(self._silence_timer_id)
+        self._silence_timer_id = self.entry.after(
+            10_000, self._on_silence_submit)
+
+    def _clear_silence_timer(self):
+        if self._silence_timer_id:
+            self.entry.after_cancel(self._silence_timer_id)
+            self._silence_timer_id = None
+
+    def _on_silence_submit(self):
+        """Called after 10s silence to auto-submit."""
+        if self._listening:
+            # simulate pressing Send
+            self.entry.event_generate("<Return>")
 
     def bind_submit(self, callback: Callable[[], None]) -> None:
         """Call callback() on Enter or button click."""
