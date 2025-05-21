@@ -20,10 +20,11 @@ _messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
 # === Model Initialization ===
 _llm = Llama(
-    model_path=r"Qwen3-4B-Q4_K_M.gguf",
+    model_path=r"G:\Qwen3-4B-Q4_K_M.gguf",
     n_ctx=2048,
-    n_gpu_layers=-1,
+    n_gpu_layers=20,
     verbose=False,
+    use_mmap=True,
 )
 
 

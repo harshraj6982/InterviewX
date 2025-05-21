@@ -56,6 +56,8 @@ def main():
 
     user_input.bind_submit(on_submit)
     user_input.bind_key(reset_timer)
+    # <- added to support voice-triggered auto-submit
+    user_input.bind_auto_submit(on_submit)
 
     output.write("Welcome! Type your question below. Type 'exit' to quit.\n")
     user_input.focus()
