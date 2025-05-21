@@ -5,8 +5,10 @@ from typing import Callable, Optional
 import re
 
 from tts_engine import TTSManager
-from stt_engine import STTManager  # new import
-import core  # for AUTO_SUBMIT_IDLE_TIMEOUT
+from stt_engine import STTManager
+from core import ChatManager  # import the class-based manager
+
+from config import CoreFlags
 
 
 class ChatOutput:
@@ -182,7 +184,10 @@ class ChatInput:
     Entry + Send button combo, with Settings button for TTS and a Record button for STT.
     """
 
-    def __init__(self, master: tk.Widget, chat_output: ChatOutput):
+    def __init__(self, master: tk.Widget, chat_output: ChatOutput, chat_manager: ChatManager):
+        # store the ChatManager instance
+        self.chat_manager = chat_manager
+
         frame = tk.Frame(master)
         frame.pack(padx=10, pady=(0, 10), fill=tk.X)
 
@@ -211,38 +216,74 @@ class ChatInput:
             frame, text="🎙️", command=self._toggle_listening)
         self.mic_btn.pack(side=tk.RIGHT, padx=(5, 0))
 
+        # Mic status indicator
+        self.mic_status = tk.Label(frame, text="🔇 Mic off", fg="grey")
+        self.mic_status.pack(side=tk.RIGHT, padx=(5, 0))
+
+        # Start polling the speaking flag so we can pause/reset the timer
+        self._poll_speaking()
+
     def bind_submit(self, callback: Callable[[], None]) -> None:
         """Call callback() on Enter or button click."""
         self.entry.bind("<Return>", lambda e: callback())
         self.send_btn.config(command=callback)
 
-    def bind_key(self, callback: Callable[[], None]) -> None:
-        """Call callback() on any keypress in entry."""
-        self.entry.bind("<Key>", lambda e: callback())
-
     def bind_auto_submit(self, callback: Callable[[], None]) -> None:
         """Register callback for auto-submit after silence."""
         self._auto_submit_callback = callback
 
+    def _start_auto_submit_timer(self) -> None:
+        """Start the auto-submit timer if conditions are met."""
+        if (
+            self._auto_submit_callback
+            and CoreFlags.input_via_speech
+            and self.chat_manager.can_interrupt_generation
+            and not self.chat_manager._is_generating
+            and not CoreFlags.is_user_speaking
+            and self.entry.get().strip()
+        ):
+            self._auto_submit_timer_id = self.entry.after(
+                self.chat_manager.AUTO_SUBMIT_IDLE_TIMEOUT * 1000,
+                self._on_auto_submit
+            )
+
     def _reset_auto_submit_timer(self) -> None:
-        """Reset the 10s silence timer for auto-submit."""
+        """Reset the auto-submit timer after silence timeout."""
         if self._auto_submit_timer_id:
             self.entry.after_cancel(self._auto_submit_timer_id)
-        self._auto_submit_timer_id = self.entry.after(
-            core.AUTO_SUBMIT_IDLE_TIMEOUT * 1000,
-            self._on_auto_submit
-        )
+            self._auto_submit_timer_id = None
+        self._start_auto_submit_timer()
+
+    def _poll_speaking(self) -> None:
+        """Poll speaking flag to pause or resume the auto-submit timer."""
+        if CoreFlags.is_user_speaking:
+            if self._auto_submit_timer_id:
+                self.entry.after_cancel(self._auto_submit_timer_id)
+                self._auto_submit_timer_id = None
+        else:
+            if not self._auto_submit_timer_id:
+                self._start_auto_submit_timer()
+        self.entry.after(100, self._poll_speaking)
 
     def _on_auto_submit(self) -> None:
         """Invoke the auto-submit callback when silence timeout elapses."""
-        if self._auto_submit_callback:
+        if (
+            self._auto_submit_callback
+            and CoreFlags.input_via_speech
+            and self.chat_manager.can_interrupt_generation
+            and not self.chat_manager._is_generating
+            and not CoreFlags.is_user_speaking
+            and self.entry.get().strip()
+        ):
             self._auto_submit_callback()
 
     def _on_segment(self, text: str) -> None:
         """Append a transcribed segment and reset the auto-submit timer."""
-        # Only accept speech if input is allowed
-        if core.is_submission_allowed():
-            self.entry.insert(tk.END, text)
+        if not self._stt_active:
+            return
+        if self.chat_manager.is_submission_allowed():
+            self.entry.insert(tk.END, text + " ")
+            self.chat_manager.input_via_speech = True
             self._reset_auto_submit_timer()
 
     def _toggle_listening(self) -> None:
@@ -253,14 +294,15 @@ class ChatInput:
         if not self._stt_active:
             self._stt_active = True
             self.mic_btn.config(relief="sunken")
+            CoreFlags.is_user_speaking = True
+            self.mic_status.config(text="🔊 Listening...", fg="green")
             self.stt_manager.start_listening(self._on_segment)
         else:
             self._stt_active = False
             self.mic_btn.config(relief="raised")
             self.stt_manager.stop_listening()
-            if self._auto_submit_timer_id:
-                self.entry.after_cancel(self._auto_submit_timer_id)
-                self._auto_submit_timer_id = None
+            CoreFlags.is_user_speaking = False
+            self.mic_status.config(text="🔇 Mic off", fg="grey")
 
     def get(self) -> str:
         """Get trimmed text."""

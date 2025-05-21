@@ -1,6 +1,7 @@
 import pyttsx3
 import threading
 import queue
+from config import TTSConfig
 
 
 class TTSManager:
@@ -9,7 +10,7 @@ class TTSManager:
     Provides runtime enable/disable, voice selection, and rate adjustment.
     """
 
-    def __init__(self, voice_index: int = 0, rate: int = 150):
+    def __init__(self, voice_index: int = TTSConfig.default_voice_index, rate: int = TTSConfig.default_rate):
         self.engine = pyttsx3.init()
         self.queue = queue.Queue()
         self._lock = threading.Lock()

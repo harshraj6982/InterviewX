@@ -2,96 +2,133 @@ import threading
 from typing import Callable
 
 from llama_cpp import Llama
-
-# === Configuration & Flags ===
-SYSTEM_PROMPT = (
-    "You are a concise, helpful assistant. "
-    "Do NOT reveal internal reasoning or chain-of-thought—only output final answers."
-)
-
-enable_auto_submit = True
-AUTO_SUBMIT_IDLE_TIMEOUT = 10  # seconds
-
-# === Internal State ===
-_is_generating = False
-_allow_always_input = True
-_submit_lock = threading.Lock()
-_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-
-# === Model Initialization ===
-_llm = Llama(
-    model_path=r"G:\Qwen3-4B-Q4_K_M.gguf",
-    n_ctx=2048,
-    n_gpu_layers=20,
-    verbose=False,
-    use_mmap=True,
-)
+from config import LLMConfig, CoreFlags
 
 
-def is_submission_allowed() -> bool:
-    """Return True if user may submit new input."""
-    return not _is_generating and _allow_always_input
-
-
-def get_block_reason() -> str:
+class ChatManager:
     """
-    If submission is disallowed, return the user-facing reason;
-    otherwise return empty string.
+    Contains all pure chat logic and LLM orchestration.
+    No UI code here—just methods you can call with
+    abstract handlers for I/O and status.
     """
-    if not _is_generating and not _allow_always_input:
-        return "❌ Input is currently disabled."
-    if _is_generating and _allow_always_input:
-        return "⚠️ Assistant is still replying…"
-    if _is_generating and not _allow_always_input:
-        return "⚠️ Assistant is replying. Input is locked."
-    return ""
 
+    def __init__(self):
+        # === Configuration & Flags (moved to config.py) ===
+        self.SYSTEM_PROMPT = LLMConfig.system_prompt
+        self.enable_auto_submit = CoreFlags.enable_auto_submit
+        self.AUTO_SUBMIT_IDLE_TIMEOUT = CoreFlags.auto_submit_idle_timeout
 
-def handle_user_submission(
-    user_text: str,
-    write_output: Callable[[str], None],
-    show_status: Callable[[str], None],
-    clear_input: Callable[[], None],
-) -> None:
-    """
-    Send user_text to the LLM, streaming results via write_output.
-    Use show_status() to display block reasons, and clear_input() only
-    when submission actually proceeds.
-    """
-    global _is_generating
+        # === Internal State ===
+        self._is_generating = False
+        self._allow_always_input = CoreFlags.allow_always_input
+        self._submit_lock = threading.Lock()
+        self._messages = [{"role": "system", "content": self.SYSTEM_PROMPT}]
 
-    if not is_submission_allowed():
-        show_status(get_block_reason())
-        return
+        # === New Control Flags ===
+        # self.is_user_speaking: bool = False  # True while VAD+MediaPipe detect speech
+        self.can_interrupt_generation: bool = CoreFlags.can_interrupt_generation
+        # True if current input originates from speech
+        # self.input_via_speech: bool = CoreFlags.input_via_speech
+        self._cancel_requested: bool = False  # internal flag to cancel generation
 
-    if _submit_lock.locked():
-        write_output("\n[Wait: assistant is still replying...]\n")
-        return
+        # === Model Initialization ===
+        self._llm = Llama(
+            model_path=LLMConfig.model_path,
+            n_ctx=LLMConfig.n_ctx,
+            n_gpu_layers=LLMConfig.n_gpu_layers,
+            verbose=LLMConfig.verbose,
+            use_mmap=LLMConfig.use_mmap,
+        )
 
-    show_status("")
-    clear_input()
+    def is_submission_allowed(self) -> bool:
+        """Return True if user may submit new input."""
+        if not self._allow_always_input:
+            return False
+        if self._is_generating:
+            return self.can_interrupt_generation
+        return True
 
-    def _generate():
-        global _is_generating
-        with _submit_lock:
-            _is_generating = True
-            _messages.append({"role": "user", "content": user_text})
-            write_output(f"\nYou: {user_text}\nAI: ")
+    def get_block_reason(self) -> str:
+        """
+        If submission is disallowed, return the user-facing reason;
+        otherwise return empty string.
+        """
+        if not self._is_generating and not self._allow_always_input:
+            return "❌ Input is currently disabled."
+        if self._is_generating and not self.can_interrupt_generation:
+            return "⚠️ Assistant is replying (interrupt disabled)."
+        if self._is_generating and self._allow_always_input:
+            return "⚠️ Assistant is still replying…"
+        if self._is_generating and not self._allow_always_input:
+            return "⚠️ Assistant is replying. Input is locked."
+        return ""
 
-            assistant_text = ""
-            try:
-                for chunk in _llm.create_chat_completion(
-                    messages=_messages, stream=True
-                ):
-                    delta = chunk["choices"][0]["delta"]
-                    token = delta.get("content", "")
-                    assistant_text += token
-                    write_output(token)
-            except Exception:
-                write_output("\n[Generation interrupted]\n")
+    def cancel_generation(self) -> None:
+        """Signal an in-progress generation thread to abort."""
+        self._cancel_requested = True
 
-            _messages.append({"role": "assistant", "content": assistant_text})
-            _is_generating = False
-            show_status("")
+    def handle_user_submission(
+        self,
+        user_text: str,
+        write_output: Callable[[str], None],
+        show_status: Callable[[str], None],
+        clear_input: Callable[[], None],
+        via_speech: bool = False,
+    ) -> None:
+        """
+        Send user_text to the LLM, streaming results via write_output.
+        Use show_status() to display block reasons, and clear_input() only
+        when submission actually proceeds.
+        """
+        # mark this as keyboard-originated input
+        CoreFlags.input_via_speech = via_speech
+        # self.input_via_speech = via_speech
+        # reset any previous cancel request
+        self._cancel_requested = False
 
-    threading.Thread(target=_generate, daemon=True).start()
+        if not self.is_submission_allowed():
+            show_status(self.get_block_reason())
+            return
+
+        if self._submit_lock.locked():
+            if self.can_interrupt_generation:
+                self.cancel_generation()
+            else:
+                write_output("\n[Wait: assistant is still replying...]\n")
+                return
+
+        show_status("")
+        clear_input()
+
+        def _generate():
+            with self._submit_lock:
+                self._is_generating = True
+                self._messages.append(
+                    {"role": "user", "content": user_text if CoreFlags.is_thinking_enabled else user_text + " /no_think"})
+                write_output(f"\nYou: {user_text}\nAI: ")
+
+                assistant_text = ""
+                try:
+                    for chunk in self._llm.create_chat_completion(
+                        messages=self._messages, stream=True
+                    ):
+                        if self._cancel_requested:
+                            if hasattr(self._llm, "stop"):
+                                self._llm.stop()
+                            break
+                        delta = chunk["choices"][0]["delta"]
+                        token = delta.get("content", "")
+                        assistant_text += token
+                        write_output(token)
+                    if self._cancel_requested:
+                        write_output("\n[Generation canceled]\n")
+                except Exception:
+                    write_output("\n[Generation interrupted]\n")
+
+                self._messages.append(
+                    {"role": "assistant", "content": assistant_text})
+                self._is_generating = False
+                self._cancel_requested = False
+                show_status("")
+
+        threading.Thread(target=_generate, daemon=True).start()

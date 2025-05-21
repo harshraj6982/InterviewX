@@ -1,7 +1,7 @@
 import tkinter as tk
 from typing import Optional
 
-import core
+from core import ChatManager
 from ui_components import ChatOutput, ChatStatus, ChatInput, DebugOutput
 
 
@@ -10,9 +10,13 @@ def main():
     root.title("Chat with LLM")
     root.geometry("800x600")
 
+    # Instantiate the new ChatManager
+    chat_manager = ChatManager()
+
     output = ChatOutput(root, filter_think_tag=True)
     status = ChatStatus(root)
-    user_input = ChatInput(root, output)
+    # Pass chat_manager into ChatInput
+    user_input = ChatInput(root, output, chat_manager)
     debug = DebugOutput(root, debug_enabled=True)
 
     def write_output(token: str) -> None:
@@ -34,29 +38,15 @@ def main():
             return
         output.write(f"\nYou: {txt}\n")
         output.reset_filter()
-        core.handle_user_submission(
-            txt, write_output, show_status, clear_input)
-
-    auto_submit_timer: Optional[str] = None
-
-    def auto_submit() -> None:
-        txt = user_input.get()
-        if txt:
-            on_submit()
-
-    def reset_timer() -> None:
-        nonlocal auto_submit_timer  # type: ignore
-        if not core.enable_auto_submit:
-            return
-        if auto_submit_timer:
-            root.after_cancel(auto_submit_timer)
-        auto_submit_timer = root.after(
-            core.AUTO_SUBMIT_IDLE_TIMEOUT * 1000, auto_submit
+        # Use the ChatManager method
+        chat_manager.handle_user_submission(
+            txt, write_output, show_status, clear_input,
+            via_speech=chat_manager.input_via_speech
         )
+        chat_manager.input_via_speech = False
 
+    # Only bind manual submit and voice-triggered auto-submit
     user_input.bind_submit(on_submit)
-    user_input.bind_key(reset_timer)
-    # <- added to support voice-triggered auto-submit
     user_input.bind_auto_submit(on_submit)
 
     output.write("Welcome! Type your question below. Type 'exit' to quit.\n")
