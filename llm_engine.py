@@ -10,8 +10,8 @@ from llama_cpp import Llama
 
 class LLMConfig:
     # Path to your local GGUF model
-    model_path: str = r"../Qwen3-4B-Q4_K_M.gguf"
-    n_ctx: int = 3072  # Context length
+    model_path: str = r"./Qwen3-4B-Q4_K_M.gguf"
+    n_ctx: int = 6144
     n_gpu_layers: int = -1
     verbose: bool = False
     use_mmap: bool = True
@@ -218,19 +218,18 @@ class BufferedPrintConsumer:
     #                 if tail:
     #                     new_sentences = self.add_text(tail)
     #                     for s in new_sentences:
-    #                         print("######",s)  
+    #                         print("######",s)
     #                     sentences.extend(new_sentences)
     #                 self._flushing = True
     #                 self._buffer = ""
     #         else:
     #             new_sentences = self.add_text(tok)
     #             for s in new_sentences:
-    #                 print("/////",s) 
+    #                 print("/////",s)
     #             sentences.extend(new_sentences)
 
     #     print("----",sentences)
     #     print(len(sentences))
-
 
     def consume_response_string(self) -> None:
         """
@@ -246,7 +245,7 @@ class BufferedPrintConsumer:
             try:
                 item = sentences_queue.get_nowait()
                 self.send_to_tts_func(item)
-                print("&&&&&&",item)
+                print("&&&&&&", item)
             except Empty:
                 pass  # no message right now
 
@@ -293,7 +292,6 @@ class BufferedPrintConsumer:
 
         # print("----", sentences)
         # print(len(sentences))
-
 
     def add_text(self, text: str) -> List[str]:
         """

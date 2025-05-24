@@ -263,23 +263,22 @@ class TTSEngine:
                 # print("Waiting for message...")
                 # <-- Changed: add timeout to avoid blocking forever
                 msg = self.text_queue.get(timeout=0.1)
-                print(f"122233333Received message: {msg}")
             except Empty:
-                print("Queue is empty")
+                # print("Queue is empty")
                 # No new text; if stop_event set and queue empty, clear and continue
                 if self.stop_event.is_set():
-                    print("Stop event detected. Clearing stop flag.")
+                    # print("Stop event detected. Clearing stop flag.")
                     if self.text_queue.empty():
-                        print("Queue is empty, clearing event now")
+                        # print("Queue is empty, clearing event now")
                         self.stop_event.clear()  # <-- Changed: clear even when idle
                 continue
 
             # --- Old blocking get branch (commented out):
             # msg = self.text_queue.get()
-            print("--1")
+
             if msg == self.EXIT_SIGNAL:
                 break
-            print("--2")
+
             if (
                 isinstance(msg, str)
                 and msg.startswith(f"{self.ENABLE_SIGNAL}:")
@@ -289,10 +288,10 @@ class TTSEngine:
                 except ValueError:
                     self.logger.warning("Invalid enable flag: %s", msg)
                 continue
-            print("--3")    
+
             if not self.tts_enabled:
                 continue
-            print("--4")
+
             if self.stop_event.is_set():
                 if self.text_queue.empty():
                     self.stop_event.clear()
@@ -316,10 +315,10 @@ class TTSEngine:
                 #     # print("Queue is empty")
                 #     self.stop_event.clear()
                 #     # pass
-            print("--5")
+
             if self._tts_thread and self._tts_thread.is_alive():
                 self._tts_thread.join()
-            print("--6")
+
             with self._lock:
                 if not self.stop_event.is_set():
                     print(f"Processing message {count}: {msg}")

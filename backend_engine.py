@@ -37,7 +37,6 @@ def send_transcript_to_tts(
     """
     Send the transcript to the TTS engine.
     """
-    print("\n"*2, "Sending transcript to TTS engine... ", text, "\n"*2)
     text_queue.put(text)
 
 

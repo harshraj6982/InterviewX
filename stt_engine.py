@@ -55,11 +55,12 @@ class STTConfig:
         "https://storage.googleapis.com/mediapipe-models/"
         "audio_classifier/yamnet/float32/1/yamnet.tflite"
     )
-    MODEL_NAME: str = "yamnet.tflite"
+    MODEL_NAME: str = r"./yamnet.tflite"
 
     # Whisper model settings
     # Options: tiny, base, small, small.en, medium, large, large-v3, large-turbo-v3
     WHISPER_MODEL: str = "small"
+    WHISPER_MODEL_PATH: str = r"./ggml-small.bin"  # English-only model
 
     # Delay before printing transcripts (sliding window)
     PRINT_DELAY_MS: int = 5_000   # 5 seconds
@@ -144,7 +145,9 @@ class STTEngine:
 
         # Whisper backend
         self.whisper_model = Model(
-            model=STTConfig.WHISPER_MODEL,
+            # model=STTConfig.WHISPER_MODEL,
+            model=STTConfig.WHISPER_MODEL_PATH,
+            # model="medium-q8_0",
             params_sampling_strategy=0,
             print_progress=False,
             print_realtime=False,
@@ -503,7 +506,8 @@ class STTEngine:
 
 # type: ignore
 # type: ignore
-def run_real_listener(audio_queue: Queue[bytes], stop_event: Event) -> None: # type: ignore
+# type: ignore
+def run_real_listener(audio_queue: Queue[bytes], stop_event: Event) -> None:
     listener = RealListener()
     listener.run(audio_queue, stop_event)
 
