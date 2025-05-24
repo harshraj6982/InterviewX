@@ -6,16 +6,30 @@ import threading
 from typing import Callable, List
 
 from llama_cpp import Llama
+import sys
+import os
+from pathlib import Path
+
+# Determine base path for bundled resources (PyInstaller or normal run)
+if getattr(sys, "frozen", False):
+    base_path = sys._MEIPASS
+else:
+    # __file__ refers to this config.py location
+    base_path = os.path.abspath(os.path.dirname(__file__))
 
 
 class LLMConfig:
+    """
+    Configuration for LLM model loading, adjusted for PyInstaller bundles.
+    """
     # Path to your local GGUF model
-    model_path: str = r"./Qwen3-4B-Q4_K_M.gguf"
+    model_path: str = str(Path(base_path) / "Qwen3-4B-Q4_K_M.gguf")
     n_ctx: int = 6144
     n_gpu_layers: int = -1
     verbose: bool = False
     use_mmap: bool = True
 
+    # Optional: toggle thinking indicator
     is_thinking_enabled: bool = False
 
     # System prompt for the assistant

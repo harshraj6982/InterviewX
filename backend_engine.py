@@ -16,9 +16,21 @@ import numpy as np
 from llm_engine import run_consumer, run_llm_engine
 from tts_engine import TTSEngine, run_tts_engine, run_speaker
 from stt_engine import STTConfig, run_real_listener, run_stt_engine, run_transcript_reciver
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
+import sys
+import os
+
+if getattr(sys, 'frozen', False):
+    # Running in PyInstaller bundle
+    base_path = sys._MEIPASS
+else:
+    # Running in normal Python environment
+    base_path = os.path.abspath(".")
+
+static_dir = os.path.join(base_path, "static")
+
 
 def send_transcript_to_llm(transcript: str, llm_input_queue: Queue):
     """
@@ -124,23 +136,26 @@ class BackendEngine:
         )
 
         self.app.mount(
-            "/static", StaticFiles(directory="static"), name="static")
+            "/static", StaticFiles(directory=static_dir), name="static")
         self._register_routes()
-
 
     # def _register_routes(self):
     #     @self.app.get("/")
     #     async def root():
     #         return {"status": "up"}
-        
 
     def _register_routes(self):
 
         @self.app.get("/", response_class=HTMLResponse)
         async def root():
-            html_path = Path("static/index.html")
-            return HTMLResponse(content=html_path.read_text(), status_code=200)
-        
+            index_file = Path(static_dir) / "index.html"
+            if not index_file.exists():
+                # better to fail explicitly with a clear error
+                raise HTTPException(
+                    status_code=500, detail=f"Index file not found at {index_file!s}")
+            content = index_file.read_text(encoding="utf-8")
+            return HTMLResponse(content=content, status_code=200)
+
         # Endpoint for receiving audio from client (STT input)
         @self.app.websocket("/ws/audio_in")
         async def audio_in(websocket: WebSocket):
@@ -166,7 +181,6 @@ class BackendEngine:
                 print("WebSocket disconnected (audio_in)")
 
         # Endpoint for sending audio to client (TTS output)
-
 
         @self.app.websocket("/ws/audio_out")
         async def audio_out(websocket: WebSocket):
@@ -245,8 +259,8 @@ class BackendEngine:
             except WebSocketDisconnect:
                 print("WebSocket disconnected (audio_out)")
 
-
         # ... inside your FastAPI app class ...
+
         @self.app.websocket("/ws/audio_file")
         async def audio_file(websocket: WebSocket):
             await websocket.accept()
@@ -316,7 +330,6 @@ class BackendEngine:
             except WebSocketDisconnect:
                 print("WebSocket disconnected (audio_file)")
 
-
     def start(self):
         # Start TTS
         self.engine_proc.start()
@@ -335,14 +348,15 @@ class BackendEngine:
         # print("STT listening process started.")
 
         # Prime TTS with a single initial sentence
-        initial = ["Hello, this is the first test sentence."]
+        initial = ["Hello! Welcome. To begin the interview, please say 'start'."]
         print(len(initial))
         for s in initial:
             self.text_queue.put(s)
-            
+
         # --- Start the FastAPI/uvicorn server in a background thread ---
         def _serve():
-            uvicorn.run(self.app, host="0.0.0.0", port=8000, log_level="info", loop="asyncio")
+            uvicorn.run(self.app, host="0.0.0.0", port=8000,
+                        log_level="info", loop="asyncio")
 
         self.server_thread = threading.Thread(target=_serve, daemon=True)
         self.server_thread.start()

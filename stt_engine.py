@@ -37,9 +37,23 @@ from mediapipe.tasks.python.audio.audio_classifier import (
 from mediapipe.tasks.python.components.containers.audio_data import AudioData
 from pywhispercpp.model import Model
 
+import sys
+import os
+from pathlib import Path
+
+# Determine base path for bundled resources (PyInstaller or normal run)
+if getattr(sys, "frozen", False):
+    base_path = sys._MEIPASS
+else:
+    # __file__ refers to this config.py location
+    base_path = os.path.abspath(os.path.dirname(__file__))
+
 
 class STTConfig:
-    # Audio & VAD settings
+    """
+    Configuration for STT and audio settings, adjusted for PyInstaller bundles.
+    """
+    # Audio settings
     RATE: int = 16_000           # 16 kHz
     CHANNELS: int = 1
     FRAME_MS: int = 30           # frame duration for VAD
@@ -50,17 +64,13 @@ class STTConfig:
     CLASSIFIER_WINDOW_MS: int = 960
     CLASSIFIER_THRESHOLD: float = 0.5
 
-    # MediaPipe model download
-    MODEL_URL: str = (
-        "https://storage.googleapis.com/mediapipe-models/"
-        "audio_classifier/yamnet/float32/1/yamnet.tflite"
-    )
-    MODEL_NAME: str = r"./yamnet.tflite"
+    # MediaPipe model
+    MODEL_NAME: str = str(Path(base_path) / "yamnet.tflite")
 
     # Whisper model settings
     # Options: tiny, base, small, small.en, medium, large, large-v3, large-turbo-v3
     WHISPER_MODEL: str = "small"
-    WHISPER_MODEL_PATH: str = r"./ggml-small.bin"  # English-only model
+    WHISPER_MODEL_PATH: str = str(Path(base_path) / "ggml-small.bin")
 
     # Delay before printing transcripts (sliding window)
     PRINT_DELAY_MS: int = 5_000   # 5 seconds
@@ -155,7 +165,7 @@ class STTEngine:
 
         # Ensure MediaPipe model is present
         self.MODEL_PATH = Path(__file__).parent / STTConfig.MODEL_NAME
-        self._ensure_model(self.MODEL_PATH, STTConfig.MODEL_URL)
+        # self._ensure_model(self.MODEL_PATH, STTConfig.MODEL_URL)
 
         # MediaPipe AudioClassifier
         base_opts = mp.tasks.BaseOptions(model_asset_path=str(self.MODEL_PATH))
