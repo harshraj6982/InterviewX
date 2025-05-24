@@ -61,12 +61,14 @@ class TTSEngine:
         self,
         text_queue: multiprocessing.Queue,
         audio_queue: multiprocessing.Queue,
+        audio_file_queue: multiprocessing.Queue,
         stop_tts_gen_event: multiprocessing.Event,  # type: ignore
 
     ) -> None:
         self.system = platform.system()
         self.text_queue = text_queue
         self.audio_queue = audio_queue
+        self.audio_file_queue = audio_file_queue
         self.stop_event = stop_tts_gen_event
         self._lock = threading.Lock()
         self._tts_thread: threading.Thread | None = None
@@ -229,6 +231,7 @@ class TTSEngine:
             # self.logger.info("Saved raw TTS output: %s", raw_filename)
 
             # 3) read and save post-read copy
+            self.audio_file_queue.put(raw_filename)
             data, samplerate = sf.read(raw_filename, dtype='float32')
             postread_filename = raw_filename.replace(
                 "tts_raw_", "tts_postread_")
@@ -242,7 +245,7 @@ class TTSEngine:
                     break
                 chunk = data[start:start + chunk_size]
                 self.audio_queue.put((samplerate, chunk))
-                print(f"Chunk {start // chunk_size + 1}")
+                # print(f"Chunk {start // chunk_size + 1}")
             # signal end of this sentence’s stream
             self.audio_queue.put(self.CHUNK_END)
 
@@ -260,22 +263,23 @@ class TTSEngine:
                 # print("Waiting for message...")
                 # <-- Changed: add timeout to avoid blocking forever
                 msg = self.text_queue.get(timeout=0.1)
+                print(f"122233333Received message: {msg}")
             except Empty:
-                # print("Queue is empty")
+                print("Queue is empty")
                 # No new text; if stop_event set and queue empty, clear and continue
                 if self.stop_event.is_set():
-                    # print("Stop event detected. Clearing stop flag.")
+                    print("Stop event detected. Clearing stop flag.")
                     if self.text_queue.empty():
-                        # print("Queue is empty, clearing event now")
+                        print("Queue is empty, clearing event now")
                         self.stop_event.clear()  # <-- Changed: clear even when idle
                 continue
 
             # --- Old blocking get branch (commented out):
             # msg = self.text_queue.get()
-
+            print("--1")
             if msg == self.EXIT_SIGNAL:
                 break
-
+            print("--2")
             if (
                 isinstance(msg, str)
                 and msg.startswith(f"{self.ENABLE_SIGNAL}:")
@@ -285,10 +289,10 @@ class TTSEngine:
                 except ValueError:
                     self.logger.warning("Invalid enable flag: %s", msg)
                 continue
-
+            print("--3")    
             if not self.tts_enabled:
                 continue
-
+            print("--4")
             if self.stop_event.is_set():
                 if self.text_queue.empty():
                     self.stop_event.clear()
@@ -312,10 +316,10 @@ class TTSEngine:
                 #     # print("Queue is empty")
                 #     self.stop_event.clear()
                 #     # pass
-
+            print("--5")
             if self._tts_thread and self._tts_thread.is_alive():
                 self._tts_thread.join()
-
+            print("--6")
             with self._lock:
                 if not self.stop_event.is_set():
                     print(f"Processing message {count}: {msg}")
@@ -437,9 +441,10 @@ class RealSpeaker:
 def run_tts_engine(
     text_queue: multiprocessing.Queue,
     audio_queue: multiprocessing.Queue,
+    audio_file_queue: multiprocessing.Queue,
     stop_event: multiprocessing.Event  # type: ignore
 ) -> None:
-    TTSEngine(text_queue, audio_queue, stop_event).run()
+    TTSEngine(text_queue, audio_queue, audio_file_queue, stop_event).run()
 
 
 def run_speaker(
