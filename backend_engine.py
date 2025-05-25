@@ -112,6 +112,10 @@ AUDIO_PATTERNS = (
 class BackendEngine:
     def __init__(self):
 
+        self.call_ended = 0
+        self.rank_queue: Queue = Queue()
+        self.jobs = {}
+
         # Create queues & stop‐events for TTS
         self.text_queue = Queue()
         self.audio_queue = Queue()
@@ -156,7 +160,7 @@ class BackendEngine:
         self.call_end_event: Event = Event()
         self.llm_engine_proc = Process(
             target=run_llm_engine,
-            args=(self.llm_input_queue, self.llm_output_queue, self.sessoion_end_event, self.call_end_event),
+            args=(self.llm_input_queue, self.llm_output_queue, self.rank_queue, self.sessoion_end_event, self.call_end_event),
             daemon=False,
         )
 
@@ -201,19 +205,46 @@ class BackendEngine:
 
         # Serve vite.svg or any root-level static files
         self.app.mount(
-            "/vite.svg", StaticFiles(directory=static_dir), name="vite-svg")
+            "/favicon.svg", StaticFiles(directory=static_dir), name="favicon-svg")
         self._register_routes()
 
-        self.call_ended = 0 
+        self.rank_listener = threading.Thread(
+            target=self._rank_listener,
+            name="rank-listener",
+            daemon=True
+        )
+        self.rank_listener.start()
 
-        self.jobs = {}
+    def _rank_listener(self) -> None:
+        """Pull { 'rank': int } dicts from rank_queue and file them."""
+        while True:
+            data = self.rank_queue.get()            # blocks
+            try:
+                rank = int(data["rank"])
+            except Exception:
+                logger.warning("Malformed rank payload: %s", data)
+                continue
+            for job_id, info in self.jobs.items():
+                if info["status"] == "processing":
+                    self.jobs[job_id] = {"status": "complete", "result": rank}
+                    break
 
-
-    async def process_job(self, job_id):
-        await asyncio.sleep(10)  # Wait for 10 seconds
-
-        number = random.choice([1, 2, 3])  # Randomly pick one number
-        self.jobs[job_id] = {"status": "complete", "result": number}
+    async def process_job(self, job_id: str, timeout: float=30.0) -> None:
+        """
+        Polls *self.jobs[job_id]* until the rank-listener thread
+        flips it to 'complete' or until *timeout* seconds elapse.
+        """
+        elapsed, step = 0.0, 0.1
+        while elapsed < timeout:
+            await asyncio.sleep(step)
+            elapsed += step
+            if self.jobs[job_id]["status"] == "complete":
+                return
+        # nothing arrived – mark failure
+        self.jobs[job_id] = {
+            "status": "failed",
+            "error": "LLM rank not received within timeout",
+        }
 
     def _register_routes(self):
 

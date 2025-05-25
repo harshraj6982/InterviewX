@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from multiprocessing import Queue, Event
+from threading import Event
 from typing import Callable
 import json
 from asyncio import Event
@@ -86,11 +86,13 @@ class LlmEngine:
         self,
         input_queue: Queue,
         output_queue: Queue,
+        rank_queue: Queue,
         sessoion_end_event: Event = None,
         call_end_event: Event = None,
     ) -> None:
         self.input_queue = input_queue
         self.output_queue = output_queue
+        self.rank_queue = rank_queue
         self.sessoion_end_event = sessoion_end_event
         self.call_end_event = call_end_event
 
@@ -271,6 +273,10 @@ class LlmEngine:
             logger.error("Ranking generation or parse failed: %s", exc)
             data = {"error": str(exc)}
         print("Interview result:", data)
+        try:
+            self.rank_queue.put({"rank": data["rank"]})
+        except Exception:
+            logger.error("Failed to put rank data into queue: %s", data)
         # Forward to external route via output_queue
         # self.output_queue.put(f"[JOB_STATUS]{json.dumps(data)}")
 
@@ -333,10 +339,11 @@ class LlmEngine:
 def run_llm_engine(
     input_queue: Queue,
     output_queue: Queue,
+    rank_queue: Queue,
     sessoion_end_event: Event = None,
     call_end_event: Event = None,
 ) -> None:
-    LlmEngine(input_queue, output_queue,
+    LlmEngine(input_queue, output_queue, rank_queue,
               sessoion_end_event, call_end_event).run()
 
 
