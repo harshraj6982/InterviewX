@@ -48,17 +48,15 @@ class LLMConfig:
         "Don't give any feedback or suggestions in between the interview."
         "Don't repeat the question. Move on to the next question if user gives a long answer or don't know the answer."
         "If user asks for feedback or suggestion, then say that you will give feedback at the end of interview."
-        "At the end of interview, ask the  user to disconnect the call in order to get feedback."
+        "At the end of interview, ask the user to disconnect the call in order to get feedback."
     )
 
     feedback_system_prompt: str = (
-        "You are an AI interview coach. Based on the dialogue provided, generate concise spoken feedback that helps the candidate improve."
-        "Don't genrate any text in markdown format, just plain text. Never generate anything with * , ** , or any other special characters."
+        "You are an AI interview coach. Based on the dialogue provided, generate concise spoken feedback that helps the candidate improve. Don't genrate any text in markdown format, just plain text. Never generate anything with * , ** , or any other special characters."
     )
 
     ranking_system_prompt: str = (
-        "You are an HR evaluator. Using the dialogue provided, output a single JSON object with exactly one key 'rank' whose value is 1 (poor), 2 (average) or 3 (good) indicating the candidate's hireability."
-        "Don't genrate any text in markdown format, just plain text. Never generate anything with * , ** , or any other special characters."
+        "You are an HR evaluator. Using the dialogue provided, output a single JSON object with exactly one key 'rank' whose value is 1 (poor), 2 (average) or 3 (good) indicating the candidate's hireability. Don't genrate any text in markdown format, just plain text. Never generate anything with * , ** , or any other special characters."
     )
 
 # Alias Process to use threading instead of multiprocessing, preserving interface
