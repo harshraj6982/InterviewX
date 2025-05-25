@@ -1,26 +1,45 @@
 # backend_engine.py
 
+import logging
+import random
+import time
+import uuid
+from fastapi.responses import HTMLResponse, JSONResponse
+import os
+import sys
+from fastapi.websockets import WebSocketState
+import uvicorn
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from stt_engine import STTConfig, run_real_listener, run_stt_engine, run_transcript_reciver
+from tts_engine import TTSEngine, run_tts_engine, run_speaker
+from llm_engine import run_consumer, run_llm_engine
+import numpy as np
+from fastapi.staticfiles import StaticFiles
 import asyncio
 from functools import partial
 import json
-from multiprocessing import Process, Queue, Event, freeze_support
-from pathlib import Path
-from queue import Empty
 import threading
+from pathlib import Path
+from queue import Queue, Empty
+from threading import Thread, Event
 import wave
 import webbrowser
 
-from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
-import numpy as np
-from llm_engine import run_consumer, run_llm_engine
-from tts_engine import TTSEngine, run_tts_engine, run_speaker
-from stt_engine import STTConfig, run_real_listener, run_stt_engine, run_transcript_reciver
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
-import sys
-import os
+
+
+logger = logging.getLogger(__name__)
+# Alias Process to use threading instead of multiprocessing, preserving interface
+
+
+class Process(Thread):
+    def __init__(self, target, args=(), daemon=False):
+        super().__init__(target=target, args=args, daemon=daemon)
+
+    def terminate(self):
+        # Threads cannot be terminated externally; no-op
+        pass
+
 
 if getattr(sys, 'frozen', False):
     # Running in PyInstaller bundle
@@ -30,6 +49,7 @@ else:
     base_path = os.path.abspath(".")
 
 static_dir = os.path.join(base_path, "static")
+assets_path = os.path.join(static_dir, "assets")
 
 
 def send_transcript_to_llm(transcript: str, llm_input_queue: Queue):
@@ -52,9 +72,39 @@ def send_transcript_to_tts(
     text_queue.put(text)
 
 
+
+def wait_until_ready(path: Path, timeout: float = 5.0, step: float = 0.05) -> None:
+    """
+    Block until `path` exists **and** its size has stopped growing.
+    A minimal size of 44 B (RIFF header) is required.
+    """
+    start = time.monotonic()
+    last_size = -1
+    while time.monotonic() - start < timeout:
+        if not path.exists():
+            time.sleep(step)
+            continue
+        size = path.stat().st_size
+        if size == last_size and size > 44:
+            return
+        last_size = size
+        time.sleep(step)
+    raise TimeoutError(f"{path} not ready after {timeout:.1f}s")
+
+
+async def safe_send(ws: WebSocket, data, *, binary: bool = False) -> None:
+    """Guarded send that raises WebSocketDisconnect if the socket is no longer open."""
+    if ws.client_state != WebSocketState.CONNECTED:
+        raise WebSocketDisconnect(code=1000)
+    if binary:
+        await ws.send_bytes(data)
+    else:
+        await ws.send_text(data)
+
+
+
 class BackendEngine:
     def __init__(self):
-        freeze_support()
 
         # Create queues & stop‐events for TTS
         self.text_queue = Queue()
@@ -137,12 +187,25 @@ class BackendEngine:
 
         self.app.mount(
             "/static", StaticFiles(directory=static_dir), name="static")
+
+        self.app.mount(
+            "/assets", StaticFiles(directory=assets_path), name="assets")
+
+        # Serve vite.svg or any root-level static files
+        self.app.mount(
+            "/vite.svg", StaticFiles(directory=static_dir), name="vite-svg")
         self._register_routes()
 
-    # def _register_routes(self):
-    #     @self.app.get("/")
-    #     async def root():
-    #         return {"status": "up"}
+        self.call_ended = 0 
+
+        self.jobs = {}
+
+
+    async def process_job(self, job_id):
+        await asyncio.sleep(10)  # Wait for 10 seconds
+
+        number = random.choice([1, 2, 3])  # Randomly pick one number
+        self.jobs[job_id] = {"status": "complete", "result": number}
 
     def _register_routes(self):
 
@@ -156,6 +219,61 @@ class BackendEngine:
             content = index_file.read_text(encoding="utf-8")
             return HTMLResponse(content=content, status_code=200)
 
+        @self.app.post("/start-call")
+        async def start_call():
+            try:
+
+                print("Received data: ", "start call")
+                self.call_ended = 0
+            except Exception as e:
+                raise HTTPException(
+                    status_code=400, detail=f"Invalid request data: {str(e)}")
+
+            return JSONResponse(content={"message": "Call started status received"}, status_code=200)
+        
+        @self.app.post("/end-call")
+        async def end_call(request: Request):
+            try:
+                data = await request.json()
+                print("Received data:", data)
+                self.call_ended = data.get("status", 0)
+                self.stop_speak_event.set()  # Stop TTS output
+                self.stop_tts_gen_event.set()  # Stop TTS generation
+            except Exception as e:
+                raise HTTPException(
+                    status_code=400, detail=f"Invalid request data: {str(e)}")
+
+            return JSONResponse(content={"message": "Call ended status received"}, status_code=200)
+
+        @self.app.post("/report")
+        async def report():
+            if self.call_ended != 1:
+                return JSONResponse(content={"message": "Call not ended yet"}, status_code=400)
+
+            job_id = str(uuid.uuid4())
+            self.jobs[job_id] = {"status": "processing", "result": None}
+
+            # Start background task
+            asyncio.create_task(self.process_job(job_id))
+
+            return JSONResponse(content={
+                "message": "Job started",
+                "job_id": job_id,
+                "status_url": f"/job-status/{job_id}"
+            }, status_code=202)
+
+        @self.app.get("/job-status/{job_id}")
+        async def job_status(job_id: str):
+            job = self.jobs.get(job_id)
+            if not job:
+                return JSONResponse(content={"message": "Invalid job ID"}, status_code=404)
+
+            if job["status"] == "complete":
+                return JSONResponse(content={"number": job["result"]}, status_code=200)
+
+            return JSONResponse(content={"status": job["status"]}, status_code=202)
+
+        
         # Endpoint for receiving audio from client (STT input)
         @self.app.websocket("/ws/audio_in")
         async def audio_in(websocket: WebSocket):
@@ -165,6 +283,10 @@ class BackendEngine:
             frame_bytes = STTConfig.FRAME_LEN * STTConfig.CHANNELS * 2
             try:
                 while True:
+                    if self.call_ended == 1:
+                        print("Call ended, closing audio_in WebSocket.")
+                        await websocket.close()
+                        break
                     chunk = await websocket.receive_bytes()  # Receive incoming PCM bytes
                     buffer.extend(chunk)
 
@@ -261,74 +383,84 @@ class BackendEngine:
 
         # ... inside your FastAPI app class ...
 
-        @self.app.websocket("/ws/audio_file")
-        async def audio_file(websocket: WebSocket):
+
+        @self.app.websocket("/ws/audio_file")                    # pylint: disable=unused-variable
+        async def audio_file(websocket: WebSocket) -> None:
+            """Stream WAV files that appear in `self.audio_file_queue`."""
             await websocket.accept()
             loop = asyncio.get_event_loop()
 
-            def file_worker():
-                """Stream full WAV files from queue to client."""
+            def async_send(data, *, binary: bool = False):
+                """Thread-friendly wrapper around safe_send()."""
+                fut = asyncio.run_coroutine_threadsafe(
+                    safe_send(websocket, data, binary=binary), loop
+                )
+                return fut.result()
+
+            def worker() -> None:                                # runs in daemon thread
                 try:
                     while True:
-                        # handle stop event: clear queue and wait
+                        # honour “stop speaking” flag
                         if self.stop_speak_event.is_set():
-                            while not self.audio_file_queue.empty():
-                                try:
-                                    self.audio_file_queue.get_nowait()
-                                except Empty:
-                                    break
+                            with self.audio_file_queue.mutex:
+                                self.audio_file_queue.queue.clear()
                             self.stop_speak_event.clear()
                             continue
 
-                        # get next filepath
                         filepath = self.audio_file_queue.get()
-                        print(f"Processing file: {filepath}")
+                        logger.debug("Processing file: %s", filepath)
+
                         if filepath == "__EXIT__":
                             break
 
+                        path = Path(filepath)
                         try:
-                            # read metadata from WAV
-                            with wave.open(filepath, "rb") as wf:
-                                sample_rate = wf.getframerate()
-                                channels = wf.getnchannels()
+                            wait_until_ready(path)
+                        except TimeoutError as exc:
+                            logger.warning("%s – skipping", exc)
+                            continue
 
-                            # read full WAV bytes
-                            with open(filepath, "rb") as f:
-                                wav_bytes = f.read()
+                        try:
+                            # ── metadata ───────────────────────────────────────────────
+                            with wave.open(str(path), "rb") as wf:   # ← cast to str
+                                meta = {
+                                    "type": "metadata",
+                                    "sample_rate": wf.getframerate(),
+                                    "channels": wf.getnchannels(),
+                                }
+                            async_send(json.dumps(meta))
 
-                            # send metadata for decodeAudioData()
-                            meta = {
-                                "type": "metadata",
-                                "sample_rate": sample_rate,
-                                "channels": channels
-                            }
-                            asyncio.run_coroutine_threadsafe(
-                                websocket.send_text(json.dumps(meta)),
-                                loop
-                            ).result()
+                            # ── payload ───────────────────────────────────────────────
+                            async_send(path.read_bytes(), binary=True)
 
-                            # send entire WAV file in one frame
-                            asyncio.run_coroutine_threadsafe(
-                                websocket.send_bytes(wav_bytes),
-                                loop
-                            ).result()
+                        except (WebSocketDisconnect, RuntimeError):
+                            logger.info(
+                                "Client disconnected while streaming %s", filepath)
+                            break
+                        except Exception:                           # noqa: BLE001
+                            logger.exception("Error streaming file %s", filepath)
 
-                        except Exception as e:
-                            print(f"Error streaming file {filepath}: {e}")
+                finally:
+                    logger.debug("audio-file worker exiting")
 
-                except Exception as e:
-                    print(f"Streaming error: {e}")
-
-            # start file-stream worker
-            t = threading.Thread(target=file_worker, daemon=True)
+            # ── launch worker thread ──────────────────────────────────────
+            t = threading.Thread(target=worker, name="audio-file-worker", daemon=True)
             t.start()
 
             try:
-                # keep connection alive
-                while True:
+                while True:                                        # keep coroutine alive
                     await asyncio.sleep(1)
             except WebSocketDisconnect:
-                print("WebSocket disconnected (audio_file)")
+                logger.info("WebSocket disconnected (audio_file)")
+            finally:
+                # clear queue so the next session starts clean
+                with self.audio_file_queue.mutex:
+                    self.audio_file_queue.queue.clear()
+                self.audio_file_queue.put("__EXIT__")              # stop worker
+                t.join(timeout=1.0)
+
+                if websocket.client_state == WebSocketState.CONNECTED:
+                    await websocket.close(code=1000)
 
     def start(self):
         # Start TTS
@@ -418,3 +550,12 @@ class BackendEngine:
 if __name__ == "__main__":
     engine = BackendEngine()
     engine.start()
+
+    try:
+        # block forever until Ctrl+C
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nReceived exit signal. Shutting down...")
+        engine.stop()
+        sys.exit(0)

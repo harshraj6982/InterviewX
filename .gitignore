@@ -6,3 +6,9 @@ Qwen3-4B-Q4_K_M.gguf
 clean.py 
 commands.txt
 Archive.zip
+build
+dist
+*.spec
+.eggs
+kokoro-v1.0.onnx
+voices-v1.0.bin

@@ -1,208 +1,27 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 
 <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>TTS Live Stream & Mic I/O</title>
-    <style>
-        body {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            height: 100vh;
-            margin: 0;
-            font-family: sans-serif;
-            background: #f0f0f0;
-        }
+  <meta charset="UTF-8" />
+  <link rel="icon" type="image/svg+xml" href="./vite.svg" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
-        #start {
-            padding: 1em 2em;
-            font-size: 1rem;
-            border: none;
-            border-radius: 0.5em;
-            background: #007BFF;
-            color: #fff;
-            cursor: pointer;
-            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
-            transition: background 0.3s;
-        }
+  <!-- Allow blob: URLs in scripts so your inline worklet can load -->
+  <meta http-equiv="Content-Security-Policy" content="
+        default-src 'self';
+        script-src 'self' blob:;
+        style-src 'self' 'unsafe-inline';
+        connect-src 'self';
+        img-src 'self' data:;
+      " />
 
-        #start:hover {
-            background: #0056b3;
-        }
-
-        #status {
-            margin-top: 1em;
-            font-size: 1.1rem;
-            color: #333;
-            text-align: center;
-            max-width: 90%;
-        }
-    </style>
+  <title>Interview</title>
+  <script type="module" crossorigin src="./assets/index-DUayJWIx.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/index-Df320RCi.css">
 </head>
 
 <body>
-    <button id="start">Start Streaming & Mic</button>
-    <p id="status">Status: Idle</p>
-
-    <script>
-        (function () {
-            // ── Configuration ───────────────────────────────────────────
-            const RETRY_DELAY_MS = 1000; // reconnect delay for output socket
-
-            // ── UI Elements ────────────────────────────────────────────
-            const startBtn = document.getElementById('start');
-            const statusEl = document.getElementById('status');
-
-            // ── Output WS / WAV playback using /ws/audio_file ──────────
-            let audioOutWs = null;
-            let audioCtx = null;
-            const bufferQueue = [];
-            let isPlaying = false;
-
-            function connectOut() {
-                console.log('[WS-Out] Connecting…');
-                statusEl.textContent = 'Status: Connecting output…';
-
-                // use the audio_file endpoint
-                audioOutWs = new WebSocket('ws://localhost:8000/ws/audio_file');
-                audioOutWs.binaryType = 'arraybuffer';
-
-                audioOutWs.addEventListener('open', () => {
-                    console.log('[WS-Out] Open');
-                    statusEl.textContent = 'Status: Connected output';
-                    if (!audioCtx) {
-                        audioCtx = new AudioContext({ latencyHint: 'interactive' });
-                    }
-                });
-
-                audioOutWs.addEventListener('message', async (evt) => {
-                    if (typeof evt.data === 'string') {
-                        // parse metadata frame
-                        try {
-                            const meta = JSON.parse(evt.data);
-                            console.log('[WS-Out] Meta:', meta);
-                            // you could use meta.sample_rate, meta.channels if needed
-                        } catch (err) {
-                            console.warn('[WS-Out] Invalid metadata:', err);
-                        }
-                        return;
-                    }
-
-                    // handle WAV file chunks
-                    try {
-                        const arrayBuffer = evt.data;
-                        const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-                        enqueueBuffer(audioBuffer);
-                    } catch (err) {
-                        console.error('[WS-Out] decodeAudioData error', err);
-                    }
-                });
-
-                audioOutWs.addEventListener('error', (err) => {
-                    console.error('[WS-Out] Error', err);
-                });
-
-                audioOutWs.addEventListener('close', (evt) => {
-                    console.log('[WS-Out] Closed', evt.code);
-                    statusEl.textContent = `Status: Disconnected; retrying in ${RETRY_DELAY_MS / 1000}s…`;
-                    setTimeout(connectOut, RETRY_DELAY_MS);
-                });
-            }
-
-            function enqueueBuffer(buffer) {
-                bufferQueue.push(buffer);
-                statusEl.textContent = `Status: Queued ${bufferQueue.length} clip(s)`;
-                if (!isPlaying) playNext();
-            }
-
-            function playNext() {
-                if (bufferQueue.length === 0) {
-                    isPlaying = false;
-                    statusEl.textContent = 'Status: Idle';
-                    return;
-                }
-                isPlaying = true;
-                const buffer = bufferQueue.shift();
-                const src = audioCtx.createBufferSource();
-                src.buffer = buffer;
-                src.connect(audioCtx.destination);
-                src.onended = () => playNext();
-                src.start();
-                statusEl.textContent = `Status: Playing (${bufferQueue.length} clip(s) left)`;
-            }
-
-            // ── Input WS / Microphone capture (unchanged) ──────────────
-            let audioInSocket = null;
-            let audioContextIn = null;
-            let processorIn = null;
-
-            function initAudioIn() {
-                console.log('[WS-In] Connecting mic…');
-                audioInSocket = new WebSocket('ws://localhost:8000/ws/audio_in');
-                audioInSocket.binaryType = 'arraybuffer';
-
-                audioInSocket.addEventListener('open', () => {
-                    console.log('[WS-In] Open');
-                    startMicCapture();
-                });
-                audioInSocket.addEventListener('error', (err) => {
-                    console.error('[WS-In] Error', err);
-                    cleanupIn();
-                });
-                audioInSocket.addEventListener('close', () => {
-                    console.log('[WS-In] Closed');
-                    cleanupIn();
-                });
-            }
-
-            function startMicCapture() {
-                audioContextIn = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-                navigator.mediaDevices.getUserMedia({ audio: true })
-                    .then(stream => {
-                        const source = audioContextIn.createMediaStreamSource(stream);
-                        processorIn = audioContextIn.createScriptProcessor(4096, 1, 1);
-                        source.connect(processorIn);
-                        processorIn.connect(audioContextIn.destination);
-
-                        processorIn.onaudioprocess = e => {
-                            const floatSamples = e.inputBuffer.getChannelData(0);
-                            const int16 = float32ToInt16(floatSamples);
-                            if (audioInSocket.readyState === WebSocket.OPEN) {
-                                audioInSocket.send(int16.buffer);
-                            }
-                        };
-                    })
-                    .catch(err => console.error('[Mic] Access error', err));
-            }
-
-            function float32ToInt16(buffer) {
-                const l = buffer.length;
-                const out = new Int16Array(l);
-                for (let i = 0; i < l; i++) {
-                    const s = Math.max(-1, Math.min(1, buffer[i]));
-                    out[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-                }
-                return out;
-            }
-
-            function cleanupIn() {
-                if (processorIn) processorIn.disconnect();
-                if (audioContextIn) audioContextIn.close();
-                if (audioInSocket) audioInSocket.close();
-                processorIn = audioContextIn = audioInSocket = null;
-            }
-
-            // ── Single-click Start ────────────────────────────────────
-            startBtn.addEventListener('click', () => {
-                startBtn.disabled = true;
-                connectOut();
-                initAudioIn();
-            });
-        })();
-    </script>
+  <div id="root"></div>
 </body>
 
 </html>

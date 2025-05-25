@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 from queue import Empty, Queue
-import multiprocessing
-import re
 import threading
+import re
 from typing import Callable, List
 
 from llama_cpp import Llama
@@ -46,6 +45,17 @@ class LLMConfig:
         "At the end of interview, give a strong feedback to user in one long paragraph so the that they can improve."
     )
 
+# Alias Process to use threading instead of multiprocessing, preserving interface
+
+
+class Process(threading.Thread):
+    def __init__(self, target, args=(), daemon=False):
+        super().__init__(target=target, args=args, daemon=daemon)
+
+    def terminate(self):
+        # Threads cannot be terminated externally; no-op
+        pass
+
 
 class LlmEngine:
     """
@@ -57,8 +67,8 @@ class LlmEngine:
 
     def __init__(
         self,
-        input_queue: multiprocessing.Queue,
-        output_queue: multiprocessing.Queue,
+        input_queue: Queue,
+        output_queue: Queue,
     ) -> None:
         self.input_queue = input_queue
         self.output_queue = output_queue
@@ -141,7 +151,6 @@ class LlmEngine:
             # callback pushes tokens into output_queue
             def write_output(tok: str) -> None:
                 self.output_queue.put(tok)
-                # print(tok, end="", flush=True)
 
             # process
             self.handle_user_submission(msg, write_output)
@@ -151,13 +160,13 @@ class LlmEngine:
 
 
 def run_llm_engine(
-    input_queue: multiprocessing.Queue,
-    output_queue: multiprocessing.Queue,
+    input_queue: Queue,
+    output_queue: Queue,
 ) -> None:
     LlmEngine(input_queue, output_queue).run()
 
 
-def run_consumer(output_queue: multiprocessing.Queue, send_to_tts_func: Callable) -> None:
+def run_consumer(output_queue: Queue, send_to_tts_func: Callable) -> None:
     consumer = BufferedPrintConsumer(output_queue, send_to_tts_func)
     while True:
         # consumer.consume_response()
@@ -170,7 +179,7 @@ class BufferedPrintConsumer:
     then either prints (consume_response) or collects sentences (consume_response_string).
     """
 
-    def __init__(self, llm_output_queue: multiprocessing.Queue, send_to_tts_func: Callable) -> None:
+    def __init__(self, llm_output_queue: Queue, send_to_tts_func: Callable) -> None:
         self.llm_output_queue = llm_output_queue
         self._buffer = ""
         self._flushing = False
@@ -200,50 +209,6 @@ class BufferedPrintConsumer:
                     self._buffer = ""
             else:
                 print(tok, end="", flush=True)
-
-    # def consume_response_string(self) -> None:
-    #     """
-    #     Reads tokens from the queue, buffers until </think>,
-    #     then starts collecting complete sentences using add_text().
-    #     Returns the list of sentences.
-    #     """
-    #     sentences = []
-    #     while True:
-    #         tok = self.queue.get()
-    #         if tok == LlmEngine.EXIT_SIGNAL:
-    #             print("\n[LLM process exited]")
-    #             break
-
-    #         if tok == LlmEngine.RESPONSE_END:
-    #             tail = self.flush()
-    #             if tail:
-    #                 print("****",tail)
-    #                 sentences.append(tail)
-    #             self._buffer = ""
-    #             self._flushing = False
-    #             break
-
-    #         if not self._flushing:
-    #             self._buffer += tok
-    #             idx = self._buffer.find(self._think_tag)
-    #             if idx != -1:
-    #                 start = idx + len(self._think_tag)
-    #                 tail = self._buffer[start:]
-    #                 if tail:
-    #                     new_sentences = self.add_text(tail)
-    #                     for s in new_sentences:
-    #                         print("######",s)
-    #                     sentences.extend(new_sentences)
-    #                 self._flushing = True
-    #                 self._buffer = ""
-    #         else:
-    #             new_sentences = self.add_text(tok)
-    #             for s in new_sentences:
-    #                 print("/////",s)
-    #             sentences.extend(new_sentences)
-
-    #     print("----",sentences)
-    #     print(len(sentences))
 
     def consume_response_string(self) -> None:
         """
@@ -278,7 +243,6 @@ class BufferedPrintConsumer:
                 if tail:
                     # print("****", tail)
                     sentences_queue.put(tail)
-                    # sentences.append(tail)
                 self._buffer = ""
                 self._flushing = False
                 break
@@ -292,20 +256,13 @@ class BufferedPrintConsumer:
                     if tail:
                         new_sentences = self.add_text(tail)
                         for s in new_sentences:
-                            # print("######", s)
                             sentences_queue.put(s)
-                        # sentences.extend(new_sentences)
-                    self._flushing = True
-                    self._buffer = ""
+                        self._flushing = True
+                        self._buffer = ""
             else:
                 new_sentences = self.add_text(tok)
                 for s in new_sentences:
-                    # print("/////", s)
                     sentences_queue.put(s)
-                # sentences.extend(new_sentences)
-
-        # print("----", sentences)
-        # print(len(sentences))
 
     def add_text(self, text: str) -> List[str]:
         """
@@ -338,10 +295,10 @@ def main() -> None:
     sends user input over input_queue, and uses BufferedPrintConsumer
     to print each response.
     """
-    input_queue: multiprocessing.Queue = multiprocessing.Queue()
-    output_queue: multiprocessing.Queue = multiprocessing.Queue()
+    input_queue: Queue = Queue()
+    output_queue: Queue = Queue()
 
-    llm_proc = multiprocessing.Process(
+    llm_proc = Process(
         target=run_llm_engine,
         args=(input_queue, output_queue),
         daemon=True,

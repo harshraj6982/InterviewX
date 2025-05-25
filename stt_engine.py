@@ -12,14 +12,14 @@ Python ≥ 3.9 • PEP 8 compliant • Graceful error handling.
 """
 
 from __future__ import annotations
-from queue import Empty
+from queue import Empty, Queue
 import time
-from multiprocessing import Process, Queue, Event, freeze_support
+from multiprocessing import freeze_support
 import contextlib
 import datetime as dt
 import logging
 import sys
-import threading
+from threading import Thread, Event, Lock
 import urllib.request
 import wave
 from collections import deque
@@ -37,9 +37,7 @@ from mediapipe.tasks.python.audio.audio_classifier import (
 from mediapipe.tasks.python.components.containers.audio_data import AudioData
 from pywhispercpp.model import Model
 
-import sys
 import os
-from pathlib import Path
 
 # Determine base path for bundled resources (PyInstaller or normal run)
 if getattr(sys, "frozen", False):
@@ -69,7 +67,7 @@ class STTConfig:
 
     # Whisper model settings
     # Options: tiny, base, small, small.en, medium, large, large-v3, large-turbo-v3
-    WHISPER_MODEL: str = "small"
+    WHISPER_MODEL: str = "medium"  # or "small", "large", etc.
     WHISPER_MODEL_PATH: str = str(Path(base_path) / "ggml-small.bin")
 
     # Delay before printing transcripts (sliding window)
@@ -155,9 +153,8 @@ class STTEngine:
 
         # Whisper backend
         self.whisper_model = Model(
-            # model=STTConfig.WHISPER_MODEL,
             model=STTConfig.WHISPER_MODEL_PATH,
-            # model="medium-q8_0",
+            # model=STTConfig.WHISPER_MODEL,
             params_sampling_strategy=0,
             print_progress=False,
             print_realtime=False,
@@ -165,7 +162,6 @@ class STTEngine:
 
         # Ensure MediaPipe model is present
         self.MODEL_PATH = Path(__file__).parent / STTConfig.MODEL_NAME
-        # self._ensure_model(self.MODEL_PATH, STTConfig.MODEL_URL)
 
         # MediaPipe AudioClassifier
         base_opts = mp.tasks.BaseOptions(model_asset_path=str(self.MODEL_PATH))
@@ -181,19 +177,7 @@ class STTEngine:
 
         # For WAV saving
         self.audio_interface = pyaudio.PyAudio()
-        self._lock = threading.Lock()
-
-    @staticmethod
-    def _ensure_model(path: Path, url: str) -> None:
-        if path.exists():
-            return
-        logging.info("Model not found → downloading: %s", url)
-        try:
-            urllib.request.urlretrieve(url, path)
-            logging.info("Model saved to %s", path)
-        except Exception as exc:
-            logging.error("Model download failed: %s", exc)
-            sys.exit(1)
+        self._lock = Lock()
 
     @staticmethod
     def _bytes_to_float32_pcm(data: bytes) -> np.ndarray:
@@ -250,9 +234,9 @@ class STTEngine:
         self,
         audio_queue: Queue[bytes],
         transcript_queue: Queue[List],
-        stop_event: threading.Event,  # type: ignore
-        stop_tts_gen_event: threading.Event,  # type: ignore
-        stop_speak_event: threading.Event,  # type: ignore
+        stop_event: Event,  # type: ignore
+        stop_tts_gen_event: Event,  # type: ignore
+        stop_speak_event: Event,  # type: ignore
     ) -> None:
         pending: list[str] = []
         last_received = 0.0
@@ -330,192 +314,8 @@ class STTEngine:
         self.audio_interface.terminate()
 
 
-# class STTEngine:
-#     """
-#     Consumes raw PCM frames from audio_queue, applies VAD + MediaPipe gating,
-#     saves WAVs, transcribes via Whisper, and prints transcripts with a 5 s
-#     sliding-window delay.
-#     """
-
-#     def __init__(self) -> None:
-#         # Logging
-#         logging.basicConfig(
-#             level=logging.INFO,
-#             format="%(asctime)s [%(levelname)s] %(message)s",
-#             handlers=[logging.StreamHandler(sys.stdout)],
-#         )
-
-#         # Whisper backend
-#         self.whisper_model = Model(
-#             model=STTConfig.WHISPER_MODEL,
-#             params_sampling_strategy=0,
-#             print_progress=False,
-#             print_realtime=False,
-#         )
-
-#         # Ensure MediaPipe model is present
-#         self.MODEL_PATH = Path(__file__).parent / STTConfig.MODEL_NAME
-#         self._ensure_model(self.MODEL_PATH, STTConfig.MODEL_URL)
-
-#         # MediaPipe AudioClassifier
-#         base_opts = mp.tasks.BaseOptions(model_asset_path=str(self.MODEL_PATH))
-#         clf_opts = AudioClassifierOptions(
-#             base_options=base_opts,
-#             max_results=1,
-#             score_threshold=STTConfig.CLASSIFIER_THRESHOLD,
-#         )
-#         self.classifier = AudioClassifier.create_from_options(clf_opts)
-
-#         # VAD
-#         self.vad = webrtcvad.Vad(1)
-
-#         # For WAV saving
-#         self.audio_interface = pyaudio.PyAudio()
-#         self._lock = threading.Lock()
-
-#     @staticmethod
-#     def _ensure_model(path: Path, url: str) -> None:
-#         if path.exists():
-#             return
-#         logging.info("Model not found → downloading: %s", url)
-#         try:
-#             urllib.request.urlretrieve(url, path)
-#             logging.info("Model saved to %s", path)
-#         except Exception as exc:
-#             logging.error("Model download failed: %s", exc)
-#             sys.exit(1)
-
-#     @staticmethod
-#     def _bytes_to_float32_pcm(data: bytes) -> np.ndarray:
-#         pcm16 = np.frombuffer(data, dtype=np.int16)
-#         return pcm16.astype(np.float32) / 32768.0
-
-#     @staticmethod
-#     def _iso_timestamp() -> str:
-#         return dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-
-#     def _save_wave(self, frames: List[bytes], out_dir: Path = Path(".")) -> Path:
-#         filename = out_dir / f"{self._iso_timestamp()}.wav"
-#         with contextlib.closing(wave.open(str(filename), "wb")) as wf:
-#             wf.setnchannels(STTConfig.CHANNELS)
-#             wf.setsampwidth(
-#                 self.audio_interface.get_sample_size(pyaudio.paInt16)
-#             )
-#             wf.setframerate(STTConfig.RATE)
-#             wf.writeframes(b"".join(frames))
-#         logging.info("Saved → %s", filename)
-#         return filename
-
-#     def _save_and_transcribe(self, frames: List[bytes]) -> str:
-#         audio_frames = frames.copy()
-#         filename = self._save_wave(audio_frames)
-#         segments = self.whisper_model.transcribe(
-#             str(filename),
-#             language="en",
-#             translate=False,
-#             greedy={"best_of": 1},
-#             beam_search={"beam_size": 1, "patience": 1},
-#         )
-#         text = " ".join(s.text.strip() for s in segments)
-#         logging.info("Transcription: %s", text)
-#         return text
-
-#     def _is_human_voice(self, window: Deque[bytes]) -> bool:
-#         if not window:
-#             return False
-#         clip = b"".join(window)
-#         audio_data = AudioData.create_from_array(
-#             self._bytes_to_float32_pcm(clip), STTConfig.RATE
-#         )
-#         result = self.classifier.classify(audio_data)[0]
-#         cats = result.classifications and result.classifications[0].categories
-#         return bool(cats and cats[0].category_name.lower() == "speech")
-
-#     def run(
-#         self,
-#         audio_queue: Queue[bytes],
-#         transcript_queue: Queue[List],
-#         stop_event: Event,  # type: ignore
-#         stop_tts_gen_event: Event,  # type: ignore
-#         stop_speak_event: Event,  # type: ignore
-#     ) -> None:
-#         pending: list[str] = []
-#         last_received = 0.0
-#         delay_s = STTConfig.PRINT_DELAY_MS / 1000.0
-
-#         segment_frames: list[bytes] = []
-#         recent: Deque[bytes] = deque(
-#             maxlen=STTConfig.CLASSIFIER_WINDOW_MS // STTConfig.FRAME_MS
-#         )
-#         recording = False
-#         silence_ms = 0
-
-#         while not stop_event.is_set():
-#             try:
-#                 frame = audio_queue.get(timeout=0.1)
-#             except Empty:
-#                 continue
-
-#             # VAD + MediaPipe gating
-#             recent.append(frame)
-#             if (
-#                 self.vad.is_speech(frame, STTConfig.RATE)
-#                 and (recording or self._is_human_voice(recent))
-#             ):
-#                 if not recording:
-#                     #######################
-
-#                     stop_tts_gen_event.set()
-#                     stop_speak_event.set()
-#                     # stop_tts_gen_event
-#                     # stop_speak_event
-
-#                     #######################
-#                     recording = True
-#                     segment_frames.extend(recent)
-#                     recent.clear()
-#                     logging.info("▶ Recording started")
-#                 segment_frames.append(frame)
-#                 # reset delay timer on human speech when pending transcripts exist
-#                 if pending:
-#                     last_received = time.time()
-#                 silence_ms = 0
-#             elif recording:
-#                 silence_ms += STTConfig.FRAME_MS
-#                 if silence_ms >= STTConfig.SILENCE_TIMEOUT_MS:
-#                     # End segment → transcribe & buffer
-#                     transcription = self._save_and_transcribe(segment_frames)
-#                     pending.append(transcription)
-#                     last_received = time.time()
-#                     segment_frames.clear()
-#                     recent.clear()
-#                     recording = False
-#                     silence_ms = 0
-
-#             # Sliding-window print
-#             if pending and (time.time() - last_received) >= delay_s:
-#                 ###############################
-
-#                 stop_tts_gen_event.clear()
-#                 stop_speak_event.clear()
-#                 time.sleep(0.5)
-
-#                 ###############################
-#                 transcript_queue.put(pending)
-#                 for txt in pending:
-#                     print(txt)
-#                 pending.clear()
-
-#         # Flush any remaining on shutdown
-#         for txt in pending:
-#             print(txt)
-#         self.audio_interface.terminate()
-
-
 # --- Top-level spawn functions, so we never pickle un-pickleable state -------
 
-# type: ignore
-# type: ignore
 # type: ignore
 def run_real_listener(audio_queue: Queue[bytes], stop_event: Event) -> None:
     listener = RealListener()
@@ -523,11 +323,11 @@ def run_real_listener(audio_queue: Queue[bytes], stop_event: Event) -> None:
 
 
 def run_stt_engine(
-        audio_queue: Queue[bytes],
-        transcript_queue: Queue[List],
-        stop_event: Event,  # type: ignore
-        stop_tts_gen_event: Event,  # type: ignore
-        stop_speak_event: Event,  # type: ignore
+    audio_queue: Queue[bytes],
+    transcript_queue: Queue[List],
+    stop_event: Event,  # type: ignore
+    stop_tts_gen_event: Event,  # type: ignore
+    stop_speak_event: Event,  # type: ignore
 ) -> None:
     engine = STTEngine()
     engine.run(audio_queue, transcript_queue, stop_event,
@@ -548,17 +348,17 @@ if __name__ == "__main__":
     stop_listener_event: Event = Event()    # type: ignore
     stop_engine_event: Event = Event()      # type: ignore
 
-    listener_proc = Process(
+    listener_proc = Thread(
         target=run_real_listener,
         args=(audio_queue, stop_listener_event),
         daemon=False,
     )
-    engine_proc = Process(
+    engine_proc = Thread(
         target=run_stt_engine,
         args=(audio_queue, transcript_queue, stop_engine_event),
         daemon=False,
     )
-    transcript_proc = Process(
+    transcript_proc = Thread(
         target=run_transcript_reciver,
         args=(transcript_queue,),
         daemon=False,
