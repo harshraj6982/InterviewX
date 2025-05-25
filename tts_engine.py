@@ -37,6 +37,8 @@ class TTSConfig:
     KOKORO_MODEL_PATH: str = "kokoro-v1.0.onnx"
     KOKORO_VOICES_PATH: str = "voices-v1.0.bin"
 
+    SAVE_WAV: bool = False
+
 
 # --------------------------------------------------------------------------- #
 #  macOS: Kokoro primary, 'say' fallback                                      #
@@ -303,10 +305,12 @@ class TTSEngine:
             self.audio_file_queue.put(raw_filename)
             data, samplerate_rd = sf.read(raw_filename, dtype="float32")
             samplerate = samplerate_rd
-            sf.write(
-                raw_filename.replace(
-                    "tts_raw_", "tts_postread_"), data, samplerate
-            )
+            if TTSConfig.SAVE_WAV:
+                sf.write(
+                    raw_filename.replace("tts_raw_", "tts_postread_"),
+                    data,
+                    samplerate,
+                )
 
             chunk_size = 2048
             for start in range(0, len(data), chunk_size):

@@ -1,21 +1,16 @@
-# import os
-# import glob
-# import atexit
-# import faulthandler; faulthandler.enable()
+import logging
+import io
+import sys
+
+utf8_stream = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="backslashreplace")
+handler = logging.StreamHandler(utf8_stream)
+handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s: %(message)s"))
+logging.root.handlers.clear()
+logging.root.addHandler(handler)
+logging.root.setLevel(logging.DEBUG)
 from backend_engine import BackendEngine
 
-# def delete_wav_files():
-#     for file_path in glob.glob("*.wav"):  # adjust path if needed
-#         try:
-#             os.remove(file_path)
-#             print(f"Deleted: {file_path}")
-#         except Exception as e:
-#             print(f"Failed to delete {file_path}: {e}")
-
 def main():
-    # Register the cleanup function
-    # atexit.register(delete_wav_files)
-    
     # Initialize the backend engine
     backend_engine = BackendEngine()
 

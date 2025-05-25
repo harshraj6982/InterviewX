@@ -73,6 +73,8 @@ class STTConfig:
     # Delay before printing transcripts (sliding window)
     PRINT_DELAY_MS: int = 5_000   # 5 seconds
 
+    SAVE_WAV: bool = False  # Save WAV files after transcription
+
 
 class RealListener:
     """
@@ -212,6 +214,11 @@ class STTEngine:
         )
         text = " ".join(s.text.strip() for s in segments)
         logging.info("Transcription: %s", text)
+        if not STTConfig.SAVE_WAV:
+            try:
+                os.remove(filename)
+            except OSError:
+                self.logger.warning("Could not delete %s", filename)
         return text
 
     def _is_human_voice(self, window: Deque[bytes]) -> bool:

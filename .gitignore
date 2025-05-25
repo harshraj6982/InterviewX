@@ -9,6 +9,8 @@ Archive.zip
 build
 dist
 *.spec
+*.wav
 .eggs
 kokoro-v1.0.onnx
 voices-v1.0.bin
+test.py

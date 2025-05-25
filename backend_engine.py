@@ -2,6 +2,7 @@
 
 import logging
 import random
+import re
 import time
 import uuid
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -12,7 +13,7 @@ import uvicorn
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from stt_engine import STTConfig, run_real_listener, run_stt_engine, run_transcript_reciver
-from tts_engine import TTSEngine, run_tts_engine, run_speaker
+from tts_engine import TTSConfig, TTSEngine, run_tts_engine, run_speaker
 from llm_engine import run_consumer, run_llm_engine
 import numpy as np
 from fastapi.staticfiles import StaticFiles
@@ -101,6 +102,11 @@ async def safe_send(ws: WebSocket, data, *, binary: bool = False) -> None:
     else:
         await ws.send_text(data)
 
+AUDIO_PATTERNS = (
+    re.compile(r"tts_raw_[0-9a-f]{32}\.wav$"),
+    re.compile(r"tts_postread_[0-9a-f]{32}\.wav$"),
+    re.compile(r"\d{8}T\d{6}Z\.wav$"),             # STT ISO stamp
+)    
 
 
 class BackendEngine:
@@ -146,9 +152,11 @@ class BackendEngine:
         # LLM queues & processes
         self.llm_input_queue: Queue = Queue()
         self.llm_output_queue: Queue = Queue()
+        self.sessoion_end_event: Event = Event()
+        self.call_end_event: Event = Event()
         self.llm_engine_proc = Process(
             target=run_llm_engine,
-            args=(self.llm_input_queue, self.llm_output_queue),
+            args=(self.llm_input_queue, self.llm_output_queue, self.sessoion_end_event, self.call_end_event),
             daemon=False,
         )
 
@@ -235,13 +243,27 @@ class BackendEngine:
         async def end_call(request: Request):
             try:
                 data = await request.json()
-                print("Received data:", data)
                 self.call_ended = data.get("status", 0)
-                self.stop_speak_event.set()  # Stop TTS output
-                self.stop_tts_gen_event.set()  # Stop TTS generation
+                self.call_end_event.set()  # Signal that the call has ended
+
+                # ── stop audio threads ───────────────────────────────
+                self.stop_speak_event.set()
+                self.stop_tts_gen_event.set()
+
+                # ── run janitor ──────────────────────────────────────
+                removed = cleanup_audio(Path("."))   # or Path(base_path)
+
+                # ── graceful shutdown (optional) ─────────────────────
+                # Stop child threads / processes that your own stop() already handles
+                # self.stop()
+                # # Give FastAPI time to send the JSON response, then hard-exit
+                # threading.Thread(
+                #     target=lambda: (time.sleep(0.2), os._exit(0)),
+                #     daemon=True
+                # ).start()
             except Exception as e:
-                raise HTTPException(
-                    status_code=400, detail=f"Invalid request data: {str(e)}")
+                raise HTTPException(status_code=400,
+                                    detail=f"Invalid request data: {e}") from e
 
             return JSONResponse(content={"message": "Call ended status received"}, status_code=200)
 
@@ -273,6 +295,20 @@ class BackendEngine:
 
             return JSONResponse(content={"status": job["status"]}, status_code=202)
 
+        @self.app.post("/audio-buffer-empty")
+        async def audio_buffer_empty():
+            logger.debug("\n\nAudio buffer empty check\n\n")
+
+            return JSONResponse(
+                content={"message": "Audio buffer is empty"}, status_code=200)
+
+        @self.app.post("/end-session")
+        async def end_session():
+            logger.debug("\n\nEnd session called\n\n")
+            self.sessoion_end_event.set()
+
+            return JSONResponse(
+                content={"message": "Session ended"}, status_code=200)
         
         # Endpoint for receiving audio from client (STT input)
         @self.app.websocket("/ws/audio_in")
@@ -433,6 +469,10 @@ class BackendEngine:
                             # ── payload ───────────────────────────────────────────────
                             async_send(path.read_bytes(), binary=True)
 
+                             # ── cleanup ───────────────────────────────────────────────
+                            if not TTSConfig.SAVE_WAV:
+                                path.unlink(missing_ok=True)
+
                         except (WebSocketDisconnect, RuntimeError):
                             logger.info(
                                 "Client disconnected while streaming %s", filepath)
@@ -488,7 +528,7 @@ class BackendEngine:
         # --- Start the FastAPI/uvicorn server in a background thread ---
         def _serve():
             uvicorn.run(self.app, host="0.0.0.0", port=8000,
-                        log_level="info", loop="asyncio")
+                        log_level="debug", loop="asyncio")
 
         self.server_thread = threading.Thread(target=_serve, daemon=True)
         self.server_thread.start()

@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+from multiprocessing import Queue, Event
+from typing import Callable
+import json
+from asyncio import Event
+import logging
 from queue import Empty, Queue
 import threading
 import re
@@ -8,6 +13,7 @@ from llama_cpp import Llama
 import sys
 import os
 from pathlib import Path
+logger = logging.getLogger(__name__)
 
 # Determine base path for bundled resources (PyInstaller or normal run)
 if getattr(sys, "frozen", False):
@@ -42,7 +48,17 @@ class LLMConfig:
         "Don't give any feedback or suggestions in between the interview."
         "Don't repeat the question. Move on to the next question if user gives a long answer or don't know the answer."
         "If user asks for feedback or suggestion, then say that you will give feedback at the end of interview."
-        "At the end of interview, give a strong feedback to user in one long paragraph so the that they can improve."
+        "At the end of interview, ask the  user to disconnect the call in order to get feedback."
+    )
+
+    feedback_system_prompt: str = (
+        "You are an AI interview coach. Based on the dialogue provided, generate concise spoken feedback that helps the candidate improve."
+        "Don't genrate any text in markdown format, just plain text. Never generate anything with * , ** , or any other special characters."
+    )
+
+    ranking_system_prompt: str = (
+        "You are an HR evaluator. Using the dialogue provided, output a single JSON object with exactly one key 'rank' whose value is 1 (poor), 2 (average) or 3 (good) indicating the candidate's hireability."
+        "Don't genrate any text in markdown format, just plain text. Never generate anything with * , ** , or any other special characters."
     )
 
 # Alias Process to use threading instead of multiprocessing, preserving interface
@@ -56,6 +72,7 @@ class Process(threading.Thread):
         # Threads cannot be terminated externally; no-op
         pass
 
+logger = logging.getLogger(__name__)
 
 class LlmEngine:
     """
@@ -69,13 +86,38 @@ class LlmEngine:
         self,
         input_queue: Queue,
         output_queue: Queue,
+        sessoion_end_event: Event = None,
+        call_end_event: Event = None,
     ) -> None:
         self.input_queue = input_queue
         self.output_queue = output_queue
+        self.sessoion_end_event = sessoion_end_event
+        self.call_end_event = call_end_event
 
         # Concurrency controls
         self._submit_lock = threading.Lock()
         self._generating_event = threading.Event()
+
+        if self.sessoion_end_event is None:
+            self.sessoion_end_event = threading.Event()
+        if self.call_end_event is None:
+            self.call_end_event = threading.Event()
+
+        # ── launch watcher that reacts as soon as the flag is set ───────────
+        self._watcher_thread = threading.Thread(
+            target=self._watch_session_end,
+            name="session-watcher",
+            daemon=True,
+        )
+        self._watcher_thread.start()
+
+        # ── launch watcher that handles post‑call processing ───────────────
+        self._call_end_thread = threading.Thread(
+            target=self._watch_call_end,
+            name="call-watcher",
+            daemon=True,
+        )
+        self._call_end_thread.start()
 
         # Message history
         self._messages = [
@@ -131,6 +173,119 @@ class LlmEngine:
                 )
                 self._generating_event.clear()
                 write_output(self.RESPONSE_END)
+    
+    # ------------------------------------------------------------------ #
+    #  Session‑end handling                                              #
+    # ------------------------------------------------------------------ #
+    def _dump_and_reset(self) -> None:
+        logger.debug("Session ended, printing messages:")
+        for m in self._messages:
+            print(f"{m['role'].capitalize()}: {m['content']}")
+        self._messages = [
+            {"role": "system", "content": LLMConfig.system_prompt}]
+        logger.debug("Messages cleaned for next session.")
+        logger.debug("Fresh session started: %s", self._messages)
+
+    def _watch_session_end(self) -> None:
+        while True:
+            self.sessoion_end_event.wait()
+            with self._submit_lock:
+                self._dump_and_reset()
+                self.sessoion_end_event.clear()
+
+    # ------------------------------------------------------------------ #
+    #  Call‑end handling (feedback + ranking)                            #
+    # ------------------------------------------------------------------ #
+    def _conversation_as_text(self) -> str:
+        """Return conversation lines as annotated text without /no_think."""
+        lines = []
+        for m in self._messages:
+            if m["role"] == "user":
+                txt = m["content"].replace("/no_think", "").strip()
+                lines.append(f"candidate: {txt}")
+            elif m["role"] == "assistant":
+                txt = m["content"].replace("/no_think", "").strip()
+                lines.append(f"ai_interviewer: {txt}")
+        return "\n".join(lines)
+
+
+    def _stream_feedback(self, convo: str, to_console: bool = False) -> None:
+        """Generate and stream audio feedback."""
+        messages = [
+            {"role": "system", "content": LLMConfig.feedback_system_prompt},
+            {"role": "user",   "content": convo},
+        ]
+        # tag so you can see where feedback begins
+        if to_console:
+            print("\n[FEEDBACK START]\n", end="", flush=True)
+
+        try:
+            for chunk in self._llm.create_chat_completion(messages=messages,
+                                                        stream=True):
+                token = chunk["choices"][0]["delta"].get("content", "")
+                if to_console:
+                    # real-time console stream
+                    print(token, end="", flush=True)
+                else:
+                    # keep old behaviour
+                    self.output_queue.put(token)
+        except Exception as exc:
+            msg = f"[Feedback generation error: {exc}]\n"
+            if to_console:
+                print(msg, end="", flush=True)
+            else:
+                self.output_queue.put(msg)
+        finally:
+            if to_console:
+                print("\n[FEEDBACK END]\n", flush=True)
+            else:
+                self.output_queue.put(self.RESPONSE_END)
+
+
+    def _rank_candidate(self, convo: str) -> None:
+        """Generate ranking JSON, parse it, and forward result."""
+        messages = [
+            {"role": "system", "content": LLMConfig.ranking_system_prompt},
+            {"role": "user", "content": convo},
+        ]
+        try:
+            # request non‑stream for easier parse
+            resp = self._llm.create_chat_completion(
+                messages=messages, stream=False)
+            text = resp["choices"][0]["message"]["content"].strip()
+            logger.debug("Ranking response text: %s", text)
+            # remove code fences first
+            cleaned = re.sub(r"```json|```", "", text).strip()
+            # try direct parse
+            try:
+                data = json.loads(cleaned)
+            except json.JSONDecodeError:
+                # fallback: extract first {{...}}
+                match = re.search(r"\{[\s\S]*?\}", cleaned)
+                if not match:
+                    raise
+                data = json.loads(match.group(0))
+            if "rank" not in data or not isinstance(data["rank"], int):
+                raise ValueError(f"Invalid JSON schema: {data}")
+        except Exception as exc:
+            logger.error("Ranking generation or parse failed: %s", exc)
+            data = {"error": str(exc)}
+        print("Interview result:", data)
+        # Forward to external route via output_queue
+        # self.output_queue.put(f"[JOB_STATUS]{json.dumps(data)}")
+
+    def _watch_call_end(self) -> None:
+        while True:
+            self.call_end_event.wait()
+            with self._submit_lock:
+                conversation_text = self._conversation_as_text()
+                self._stream_feedback(conversation_text)
+                self._rank_candidate(conversation_text)
+                self.call_end_event.clear()
+
+    # ------------------------------------------------------------------ #
+    #  Main engine loop                                                 #
+    # ------------------------------------------------------------------ #
 
     def run(self) -> None:
         """
@@ -141,6 +296,22 @@ class LlmEngine:
             print(f"LLM engine received: {msg}")
             if msg == self.EXIT_SIGNAL:
                 break
+            
+            if self.sessoion_end_event.is_set():
+                # Print and empty the _messages
+                logger.debug("Session ended, printing messages:")
+                for m in self._messages:
+                    role = m["role"]
+                    content = m["content"]
+                    print(f"{role.capitalize()}: {content}")
+
+                # clean message
+                self._messages = [
+                    {"role": "system", "content": LLMConfig.system_prompt}]
+
+                logger.debug("Messages cleaned for next session.")
+                logger.debug("Fresh session started.", self._messages)
+                self.sessoion_end_event.clear()
 
             if self.is_generating:
                 # refuse overlap
@@ -162,8 +333,11 @@ class LlmEngine:
 def run_llm_engine(
     input_queue: Queue,
     output_queue: Queue,
+    sessoion_end_event: Event = None,
+    call_end_event: Event = None,
 ) -> None:
-    LlmEngine(input_queue, output_queue).run()
+    LlmEngine(input_queue, output_queue,
+              sessoion_end_event, call_end_event).run()
 
 
 def run_consumer(output_queue: Queue, send_to_tts_func: Callable) -> None:
