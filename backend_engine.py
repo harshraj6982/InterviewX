@@ -109,6 +109,22 @@ AUDIO_PATTERNS = (
 )    
 
 
+def cleanup_audio(dir_: Path = Path(".")) -> int:
+    """
+    Delete every WAV file created by this app in *dir_*.
+    Returns the number of files removed.
+    """
+    removed = 0
+    for wav in dir_.glob("*.wav"):
+        if any(pat.match(wav.name) for pat in AUDIO_PATTERNS):
+            try:
+                wav.unlink()
+                removed += 1
+            except OSError as exc:                  # permissions, race, …
+                logging.warning("Could not delete %s: %s", wav, exc)
+    return removed
+
+
 class BackendEngine:
     def __init__(self):
 
