@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
+import sys 
 import platform
 import subprocess
 import threading
@@ -25,6 +27,13 @@ from typing import Optional
 import sounddevice as sd
 import soundfile as sf
 
+# Determine base path for bundled resources (PyInstaller or normal run)
+if getattr(sys, "frozen", False):
+    base_path = sys._MEIPASS
+else:
+    # _file_ refers to this config.py location
+    base_path = os.path.abspath(os.path.dirname(__file__))
+
 # --------------------------------------------------------------------------- #
 #  Configuration                                                              #
 # --------------------------------------------------------------------------- #
@@ -34,8 +43,8 @@ class TTSConfig:
     """
     Central place for runtime-adjustable constants.
     """
-    KOKORO_MODEL_PATH: str = "kokoro-v1.0.onnx"
-    KOKORO_VOICES_PATH: str = "voices-v1.0.bin"
+    KOKORO_MODEL_PATH: str = str(Path(base_path) / "kokoro-v1.0.onnx")
+    KOKORO_VOICES_PATH: str = str(Path(base_path) / "voices-v1.0.bin")
 
     SAVE_WAV: bool = False
 
@@ -190,7 +199,7 @@ class TTSEngine:
                     self._ensure_kokoro()
                     kokoro_voice = (
                         # type: ignore[operator,union-attr]
-                        "af_heart" if "af_heart" in self._kokoro.get_voices() else voice
+                        voice if voice in self._kokoro.get_voices() else "af_heart"
                     )
                     samples, samplerate = self._kokoro.create(  # type: ignore[union-attr]
                         text,
